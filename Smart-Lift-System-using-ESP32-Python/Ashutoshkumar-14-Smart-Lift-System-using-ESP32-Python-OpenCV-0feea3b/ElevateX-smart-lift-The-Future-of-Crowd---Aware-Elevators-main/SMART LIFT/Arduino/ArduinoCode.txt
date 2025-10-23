@@ -1,0 +1,178 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Wi-Fi credentials
+const char* ssid = "Galaxy";
+const char* password = "88888888";
+
+// Motor driver pins
+#define IN1 26
+#define IN2 27
+
+// LED output pins for floor indication
+const int ledPins[3] = {15, 2, 4}; // Floor 0, 1, 2 LEDs
+const int reedPins[3] = {33, 32, 25}; // Floor 0, 1, 2 Reed switches
+
+int crowdCount[3] = {0, 0, 0};
+int targetFloor = -1;
+bool moving = false;
+
+WebServer server(80);
+
+// Stop motor
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
+
+// Move motor UP
+void moveDown() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+// Move motor DOWN
+void moveUp() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+}
+
+// Get current floor from reed switch
+int getCurrentFloor() {
+  for (int i = 0; i < 3; i++) {
+    int val = digitalRead(reedPins[i]);
+    Serial.printf(" Reed[%d] = %d\n", i, val);
+    if (val == LOW) return i;
+  }
+  Serial.println(" No reed switch is LOW");
+  return -1;
+}
+
+// Set only the active floor LED
+void setOnlyLED(int floor) {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(ledPins[i], (i == floor) ? HIGH : LOW);
+  }
+}
+
+// Reset all crowd data after lift served one request
+void resetCrowdData() {
+  for (int i = 0; i < 3; i++) crowdCount[i] = 0;
+  targetFloor = -1;
+  moving = false;
+}
+
+// Move lift to the given floor with logic from test case version
+void moveLiftToFloor(int target) {
+  int current = getCurrentFloor();
+
+  if (current == -1) {
+    Serial.println(" No floor detected. Moving DOWN to find base.");
+    moveDown();
+    while ((current = getCurrentFloor()) == -1) delay(100);
+    stopMotor();
+  }
+
+  if (current == target) {
+    stopMotor();
+    setOnlyLED(current);
+    Serial.printf(" Already at target floor: %d\n", current);
+    delay(5000);
+    resetCrowdData();
+    return;
+  }
+
+  if (target > current) moveUp();
+  else moveDown();
+
+  while (true) {
+    int floor = getCurrentFloor();
+    if (floor == target) {
+      stopMotor();
+      setOnlyLED(floor);
+      Serial.printf("✅ Reached target floor: %d\n", floor);
+      delay(5000);
+      resetCrowdData();
+      break;
+    }
+    delay(100);
+  }
+}
+
+// Handle HTTP request for each floor
+void handleFloorRequest(int floor) {
+  if (server.hasArg("count")) {
+    crowdCount[floor] = server.arg("count").toInt();
+    Serial.printf(" Floor %d count = %d\n", floor, crowdCount[floor]);
+    checkForMaxCrowd();
+  }
+  server.send(200, "text/plain", "Count received");
+}
+
+// Find floor with maximum crowd
+void checkForMaxCrowd() {
+  int maxCount = -1;
+  int maxFloor = -1;
+  for (int i = 0; i < 3; i++) {
+    if (crowdCount[i] > maxCount) {
+      maxCount = crowdCount[i];
+      maxFloor = i;
+    }
+  }
+  if (maxFloor != -1) {
+    targetFloor = maxFloor;
+    moving = true;
+    Serial.printf("➡ Moving to floor %d (count: %d)\n", targetFloor, maxCount);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Motor setup
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  stopMotor();
+
+  // LED & reed switch setup
+  for (int i = 0; i < 3; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], LOW);
+    pinMode(reedPins[i], INPUT_PULLUP);
+  }
+
+  // Wi-Fi setup
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ Connected to Wi-Fi");
+  Serial.print("🌐 ESP32 IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // HTTP server setup
+  server.on("/floor0", []() { handleFloorRequest(0); });
+  server.on("/floor1", []() { handleFloorRequest(1); });
+  server.on("/floor2", []() { handleFloorRequest(2); });
+  server.begin();
+  Serial.println("📡 HTTP Server started");
+}
+
+void loop() {
+  static unsigned long lastRun = 0;
+  static bool running = false;
+
+  server.handleClient();
+
+  if (!running && moving && targetFloor != -1 && millis() - lastRun > 5000) {
+    Serial.println("\n🚀 Lift is moving...");
+    running = true;
+    moveLiftToFloor(targetFloor);
+    lastRun = millis();
+    running = false;
+  }
+
+  delay(300); // For Serial readability
+}
